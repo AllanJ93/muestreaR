@@ -5,3 +5,5 @@
 .DS_Store
 auditoria/data
 auditoria/rsconnect
+renv
+R/escuelas.R

@@ -10,16 +10,17 @@ DiseñoINE <- R6::R6Class("Diseño",
                            n_i=list(),
                            variable_poblacional=NULL,
                            niveles=tibble::tibble(nivel=NULL,
-                                          tipo=NULL,
-                                          descripcion=NULL,
-                                          llave=NULL,
-                                          aprobado=NULL,
-                                          unidades=NULL,
-                                          plan_muestra=NULL),
+                                                  tipo=NULL,
+                                                  descripcion=NULL,
+                                                  llave=NULL,
+                                                  aprobado=NULL,
+                                                  unidades=NULL,
+                                                  plan_muestra=NULL),
                            muestra = NULL,
                            cuotas = NULL,
                            n_sustitucion = 0,
                            dir.exportar = NULL,
+                           sobre_muestra = NULL,
                            initialize = function(poblacion,
                                                  n,
                                                  n_0,
@@ -86,7 +87,7 @@ DiseñoINE <- R6::R6Class("Diseño",
                              self$n_i <- self$n_i[-grep(glue::glue("(cluster|strata)_[{nivel}-9]"),
                                                         names(self$n_i))]
                            },
-                           plan_muestra =function(nivel, criterio, unidades_nivel){
+                           plan_muestra =function(nivel, criterio, unidades_nivel, manual){
                              nivel_l <- nivel
                              if(nivel_l==0){
                                # Se asigna el nivel 0
@@ -117,10 +118,19 @@ DiseñoINE <- R6::R6Class("Diseño",
                                  # Si no es el último nivel
                                  # Primero se asigna m
                                  # Después se asigna n
-                                 res <- asignar_m(diseño = self,
-                                                  criterio = criterio,
-                                                  unidades_nivel = unidades_nivel) %>%
-                                   left_join(asignar_n(self))
+                                 if(criterio != "manual"){
+                                   res <- asignar_m(diseño = self,
+                                                    criterio = criterio,
+                                                    unidades_nivel = unidades_nivel, manual = manual) %>%
+                                     left_join(asignar_n(self))
+                                 } else{
+
+                                   res <- asignar_m(diseño = self,
+                                                    criterio = criterio,
+                                                    unidades_nivel = unidades_nivel, manual = manual) %>%
+                                     mutate(!!rlang::sym(glue::glue("n_{nivel_l}")) := !!rlang::sym(glue::glue("m_{nivel_l}"))/sum(!!rlang::sym(glue::glue("m_{nivel_l}"))) * self$n)
+                                 }
+
                                  # Se etiqueta
                                  res <- purrr::set_names(list(res), glue::glue("{self$niveles %>%
                                                      filter(nivel==nivel_l) %>%
@@ -131,6 +141,57 @@ DiseñoINE <- R6::R6Class("Diseño",
                                mutate(plan_muestra=(nivel<=nivel_l))
                              self$n_i <- c(self$n_i, res)
                              return(res)
+                           },
+                           sobremuestra = function(nivel, unidad, unidad_elegida, total_m, total_n){
+                             #modificar n_i
+                             #modificar niveles
+                             #tablita de sobremuestra para indicar en extraer muestra
+
+                             tipo_nivel <- self$n_i %>% names() %>% grep(glue::glue("strata|cluster_{nivel}"),. ,value = T)
+
+                             estratos <- self$poblacion$marco_muestral %>%
+                               filter(!!rlang::sym(unidad) == !! unidad_elegida) %>%
+                               distinct(!!rlang::sym(tipo_nivel))
+
+                             if(nivel == 1){
+                               modif <- self$n_i %>% pluck(tipo_nivel) %>% semi_join(estratos)
+
+                               self$n_i[[tipo_nivel]] <-
+                                 self$n_i %>% pluck(tipo_nivel) %>% anti_join(
+                                   estratos
+                                 ) %>% bind_rows(
+
+                                   modif %>%
+                                     mutate(pct_m = m_1/sum(m_1),
+                                            tot_m = sum(m_1),
+                                            faltan_m = !!total_m-tot_m,
+                                            nuevo_m = round(faltan_m*pct_m),
+                                            pct_n = n_1/sum(n_1),
+                                            tot_n = sum(n_1),
+                                            faltan_n = !!total_n-tot_n,
+                                            nuevo_n = faltan_n*pct_n
+                                     ) %>%
+                                     transmute(strata_1, m_1 = m_1 + nuevo_m, n_1 = n_1 + nuevo_n)
+                                 ) %>% arrange(!!rlang::sym(tipo_nivel))
+
+                               self$n <- self$n_i[[tipo_nivel]] %>% summarise(sum(n_1)) %>% pull(1) %>% round()
+
+                               self$niveles <- self$niveles %>%
+                                 mutate(unidades = case_when(nivel == (!!nivel +1)~(self$n_i %>% pluck(tipo_nivel) %>%
+                                                                                      summarise(sum(m_1)) %>% pull(1)),
+                                                             nivel == 0 ~ self$n/self$n_0,
+                                                             T~unidades))
+
+
+                               self$sobre_muestra <- self$sobre_muestra %>%
+                                 bind_rows(
+                                   modif %>%
+                                     rename_with(.fn = ~glue("{.x}_vieja"), .cols = matches("m_|n_")) %>%
+                                     mutate(!!rlang::sym(unidad) := !!unidad_elegida, m_sm = round(total_m*m_1_vieja/sum(m_1_vieja)), n_sm = total_n*n_1_vieja/sum(n_1_vieja))
+                                 )
+                             } else{
+                               stop("sobremuestra no programada para este nivel de profundidad")
+                             }
                            },
                            fpc = function(nivel){
                              self$poblacion$marco_muestral <- calcular_fpc(self, nivel = nivel)
@@ -153,8 +214,8 @@ DiseñoINE <- R6::R6Class("Diseño",
                              }
                              self$muestra <- m
                            },
-                           calcular_cuotas = function(){
-                             self$cuotas <- cuotas_ine(self)
+                           calcular_cuotas = function(ajustar = T){
+                             self$cuotas <- cuotas_ine(self, ajustar = ajustar)
                            },
                            revisar_muestra = function(prop_vars, var_extra){
                              a <- llaves(self)
@@ -176,8 +237,8 @@ DiseñoINE <- R6::R6Class("Diseño",
                              readr::write_rds(self, glue::glue("{carpeta}/diseño.rda"))
                              shp %>% readr::write_rds(glue::glue("{carpeta}/shp.rda"))
                            },
-                           sustituir_muestra = function(shp, id, zoom = 16){
-                             self <- sustituir_muestra_ine(self, shp, id, zoom, dir = glue::glue("{self$dir.exportar}/Mapas"))
+                           sustituir_muestra = function(shp, id, zoom = 16, ajustar_cuotas = T){
+                             self <- sustituir_muestra_ine(self, shp, id, zoom, dir = glue::glue("{self$dir.exportar}/Mapas"), ajustar_cuotas = ajustar_cuotas)
 
                              if(!file.exists(glue::glue("{self$dir.exportar}/Mapas/Eliminadas"))) dir.create(glue::glue("{self$dir.exportar}/Mapas/Eliminadas"))
 

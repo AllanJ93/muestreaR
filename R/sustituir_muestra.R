@@ -82,7 +82,7 @@ return(diseño)
 #' @export
 #'
 #' @examples
-sustituir_muestra_ine <- function(diseño, shp, id, zoom, dir){
+sustituir_muestra_ine <- function(diseño, shp, id, zoom, dir, ajustar_cuotas){
 
   # sólo se puede sustituir el último nivel
   t_nivel <- diseño$niveles %>% filter(nivel == !!diseño$ultimo_nivel) %>% pull(variable)
@@ -125,7 +125,7 @@ sustituir_muestra_ine <- function(diseño, shp, id, zoom, dir){
   diseño$muestra$MZA <- diseño$muestra$MZA %>% filter(!!rlang::sym(nivel) != id) %>% bind_rows(nuevas_manzanas)
   #calcular cuota del nuevo
 
-  aux_cuotas <- muestreaR:::cuotas_ine(diseño)
+  aux_cuotas <- muestreaR:::cuotas_ine(diseño, ajustar = ajustar_cuotas)
   cuotas_nuevo <- aux_cuotas %>% anti_join(diseño$cuotas, by = nivel)
 
   cuotas_viejo <- diseño$cuotas %>% filter(!!rlang::sym(nivel) == id)

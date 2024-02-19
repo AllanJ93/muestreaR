@@ -584,9 +584,43 @@ muestrear <- function(diseño, nivel){
     split(.[[nivel_principal]]) %>% purrr::map_df(~{
       n_nivel <- diseño$n_i %>% .[[nivel_principal]] %>%
         filter(!!sym(nivel_principal) == unique(.x[[nivel_principal]])) %>% pull(glue::glue("m_{nivel}"))
-      sorteado <- if(nivel_secundario == "cluster_0") .x %>% slice_sample(n = n_nivel) else{
-        .x %>% slice_sample(weight_by = total,n = n_nivel)
+
+      if(nivel_secundario == "cluster_0") sorteado <- .x %>% slice_sample(n = n_nivel) else{
+        if(is.null(diseño$sobre_muestra)){
+          no_necesita_sm <- T
+        } else{
+          no_necesita_sm <- diseño$sobre_muestra %>% semi_join(.x) %>% nrow() == 0
+        }
+
+        if(no_necesita_sm){
+          sorteado <-  .x %>% slice_sample(weight_by = total,n = n_nivel)
+        } else{
+          n_nivel_original <- diseño$sobre_muestra %>% semi_join(.x) %>% pull(m_1_vieja)
+          sorteo_normal <- .x %>% slice_sample(weight_by = total,n = n_nivel_original)
+
+          ya <- sorteo_normal %>% semi_join(
+            diseño$poblacion$marco_muestral %>% semi_join(diseño$sobre_muestra)
+          )
+
+          n_nivel_sm <- diseño$sobre_muestra %>% semi_join(.x) %>% pull(m_sm) -nrow(ya)
+
+          sorteo_sm <- .x %>% semi_join(
+            diseño$poblacion$marco_muestral %>% semi_join(diseño$sobre_muestra)
+          ) %>%
+            anti_join(sorteo_normal)
+
+          if(nrow(sorteo_sm) > n_nivel_sm) {
+           sorteo_sm <- sorteo_sm %>%
+             slice_sample(weight_by = total,n = n_nivel_sm)
+          }
+
+          sorteado <- bind_rows(sorteo_normal, sorteo_sm)
+
+        }
+
       }
+
+
       return(sorteado)
     })
 
@@ -661,7 +695,7 @@ cuotas <- function(diseño){
 #' @export
 #'
 #' @examples
-cuotas_ine <- function(diseño){
+cuotas_ine <- function(diseño, ajustar){
   u_nivel <- diseño$niveles %>% filter(nivel == diseño$ultimo_nivel)
   u_cluster <- u_nivel %>% transmute(paste(tipo,nivel,sep = "_")) %>% pull(1)
   muestra <- diseño$muestra %>% purrr::pluck(length(diseño$muestra))
@@ -683,24 +717,30 @@ cuotas_ine <- function(diseño){
       ent
     ) %>% mutate(n =  round(pct*entrevistas))
 
-  revision <- cuotas %>% count(!!rlang::sym(u_cluster), wt = n)
+  if(ajustar){
+    revision <- cuotas %>% count(!!rlang::sym(u_cluster), wt = n)
 
-  c <- revision %>% left_join(ent) %>% mutate(diff = entrevistas - n) %>%
-    select(a = 1,b = 4) %>%
-    purrr::pmap_df(function(a, b){
-      aux <- cuotas %>% filter(!!rlang::sym(u_cluster) == !! a)
-      ya <- abs(b)
-      while(ya != 0){
-        alea <- min(nrow(aux), ya)
-        aleatorio <- sample(x = seq_len(nrow(aux)), size = alea)
-        aux[aleatorio, "n"] <- aux[aleatorio, "n"] + sign(b)
-        ya <- ya - alea
-      }
+    ci <- revision %>% left_join(ent) %>% mutate(diff = entrevistas - n) %>%
+      select(a = 1,b = 4) %>%
+      purrr::pmap_df(function(a, b){
+        aux <- cuotas %>% filter(!!rlang::sym(u_cluster) == !! a)
+        ya <- abs(b)
+        while(ya != 0){
+          alea <- min(nrow(aux), ya)
+          aleatorio <- sample(x = seq_len(nrow(aux)), size = alea)
+          aux[aleatorio, "n"] <- aux[aleatorio, "n"] + sign(b)
+          ya <- ya - alea
+        }
 
-      return (aux)
-    })
+        return (aux)
+      })
 
-  cool <- c %>% count(!!rlang::sym(u_cluster), wt = n) %>% left_join(ent) %>% filter(n != entrevistas)
-  if(nrow(cool) == 0 & nrow(c) == nrow(cuotas)) print("Exacto")
-  return(c %>% select(-cantidad,-pct,-entrevistas,-Seccion))
+    cool <- ci %>% count(!!rlang::sym(u_cluster), wt = n) %>% left_join(ent) %>% filter(n != entrevistas)
+    if(nrow(cool) == 0 & nrow(ci) == nrow(cuotas)) print("Exacto")
+    ci <- ci %>% select(-cantidad,-pct,-entrevistas,-Seccion)
+  } else{
+    ci <- cuotas
+  }
+
+  return(ci)
 }
